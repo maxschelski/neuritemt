@@ -1,5 +1,5 @@
 # neuriteMT
-The package analyzes microtubule orientation in neurites based on the output from utrack / plustiptracker (Danuser lab; https://github.com/DanuserLab/u-track).
+The package analyzes microtubule (MT) orientation in neurites based on the output from utrack / plustiptracker (Danuser lab; https://github.com/DanuserLab/u-track).
 
 # Installation
 
