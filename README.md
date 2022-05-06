@@ -1,7 +1,5 @@
-# pyNeurite
-A computer vision package that analyzes microtubule orientation in neurites based on the output from utrack / plustiptracker (Danuser lab; https://github.com/DanuserLab/u-track).
-
-Used in Schelski and Bradke 2022
+# mtNeurite
+The package analyzes microtubule orientation in neurites based on the output from utrack / plustiptracker (Danuser lab; https://github.com/DanuserLab/u-track).
 
 # Installation
 
