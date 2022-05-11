@@ -8,32 +8,33 @@ from skimage import morphology as morph
 from skimage import filters
 from pyneurite.neuriteanalyzer import NeuriteAnalyzer
 from pyneurite.tools.generaltools import generalTools
+import math
 
 class MTanalyzer():
 
-    def __init__(self, mat_data):
-        self.mat_data = mat_data
+    def __init__(self, comet_data_mat):
+        self.comet_data_mat = comet_data_mat
 
-    def analyze_orientation(self, distance_for_neurite_direction = 3,
+    def analyze_orientation(self, distance_for_neurite_direction = 5,
                             distance_for_comet_direction=3,
                             search_radius_start = 3,
                             search_radius_step = 2,
                             max_search_radius = 100,
-                            min_branch_size=15,
-                            branchLengthToKeep=15):
+                            min_branch_size=5,
+                            branchLengthToKeep=5):
         """
         Analyze microtubule orientation based on mat file generated
         by utrack / plustiptracker (Danuser lab)
         """
 
-        comet_data = self.get_comet_data(comet_data_mat)
+        comet_data = self.get_comet_data()
 
         image_averaged, image = self.get_images_from_comets(comet_data,
                                                             (512, 512))
 
         analyzer = NeuriteAnalyzer(image_thresh=image,
                                    image=image_averaged)
-        analyzer.min_branch_size = min_branch_size
+        analyzer.minBranchSize = min_branch_size
         analyzer.branchLengthToKeep = branchLengthToKeep
         analyzer.get_clean_thresholded_image(find_threshold=False,
                                               connect_islands=False,
@@ -41,16 +42,19 @@ class MTanalyzer():
                                               separate_neurites_by_opening=False)
         analyzer.get_neurite_skeletons()
         all_sorted_points = analyzer.get_neurites()
-        labeled_threshold_image = analyzer.timeframe_thresholded_neurites_labeled
+        thresholded_image_labeled = analyzer.timeframe_thresholded_neurites_labeled
         neurites_labeled = analyzer.timeframe_neurites_labeled
+        self.neurites_labeled = neurites_labeled
+        self.thresholded_image_labeled = thresholded_image_labeled
 
         neurite_labels = self.get_neurite_labels_of_all_comet_points(comet_data,
-                                                                     labeled_threshold_image,
+                                                                     thresholded_image_labeled,
                                                                      neurites_labeled)
         comet_data["neurite"] = neurite_labels
 
         # sort data before asigning values to prevent wrong assignments
-        comet_data.sort_values("track_nb", inplace=True)
+        comet_data.sort_values(["track_nb", "frame"], inplace=True)
+
         comet_data["neurite"] = self.get_most_common_neurite_labels_of_comets(comet_data)
 
         # exclude comets which are not in a neurite
@@ -62,56 +66,28 @@ class MTanalyzer():
 
         comet_data = self.add_closest_neurite_point_to_comet_data(comet_data,
                                                                  neurites_labeled,
-                                                                 distance_for_neurite_direction,
                                                                  search_radius_start,
                                                                  search_radius_step,
                                                                  max_search_radius)
-        neurite_direction_data = self.get_neurite_direction(all_sorted_points,
-                                                       distance_for_neurite_direction)
+        # check whether from first to last comet point the closest neurite point
+        # is earlier in the sorted array (closer to the soma / minus-end-out)
+        # or later in the sorted array (closer to neurite tip / plus-end-out)
 
-        comet_direction_data = self.get_comet_direction_data(comet_data,
-                                                        distance_for_comet_direction)
+        orientation_data = comet_data.groupby("track_nb").apply(self.get_comet_orientation,
+                                                                all_sorted_points)
+        comet_data["orientation"] = np.concatenate(orientation_data.values)
 
-        comet_data["direction_x"] = comet_direction_data[:, 0]
-        comet_data["direction_y"] = comet_direction_data[:, 1]
-
-        neurite_point_indices = np.array((comet_data["closest_neurite_point_x"],
-                                          comet_data["closest_neurite_point_y"])).T
-        neurite_point_indices = [tuple([int(neurite_point[0]),
-                                        int(neurite_point[1])])
-                                 for neurite_point in neurite_point_indices]
-
-        neurite_directions = neurite_direction_data.loc[neurite_point_indices]
-        comet_data["neurite_direction_x"] = neurite_directions["direction_x"].values
-        comet_data["neurite_direction_y"] = neurite_directions["direction_y"].values
-
-        # get the angle between each of the neurite directions and the direction
-        # of the comet, get the direction from the angle
-        neurite_angles = self.get_angles_from_directions(comet_data["neurite_direction_x"],
-                                                         comet_data["neurite_direction_y"])
-        comet_angles = self.get_angles_from_directions(comet_data["direction_x"],
-                                                       comet_data["direction_y"])
-
-        comet_data["neurite_angle"] = neurite_angles
-        comet_data["angle"] = comet_angles
-        # since the direction of the difference does not matter,
-        # use the absolute difference
-        unchanged_angle_difference = (comet_data["angle"] -
-                                      comet_data["neurite_angle"]).abs()
-        # The relevant difference of angles is max. 180 degrees (opposing direction)
-        # therefore subtract 360 from the angle difference and then take
-        # the smallest of the two differences
-        changed_angle_difference = (unchanged_angle_difference - 360).abs()
-
-        final_angle_difference = np.minimum(unchanged_angle_difference,
-                                            changed_angle_difference)
-        comet_data["orientation"] = "minus-end-out"
-        comet_data.loc[final_angle_difference < 90,
-                           "orientation"] = "plus-end-out"
-
-        all_directions = comet_data.groupby("track_nb").apply(get_most_common_direction)
-
-        comet_data["anterograde"] = np.concatenate(all_directions.values)
+        # for comet orientation that could not be determined
+        # check whether a clear comet direction can be found from
+        # comparing the comet direction to neurite direction
+        comet_data_orientation_from_direction = self.get_comet_orientation_from_comparing_direction_to_neurite(comet_data,
+                                                                                                               all_sorted_points,
+                                                                                                               distance_for_neurite_direction,
+                                                                                                               distance_for_comet_direction)
+        nan_rows = comet_data["orientation"].isnull()
+        orientation_from_direction = comet_data_orientation_from_direction.loc[nan_rows,
+                                                                               "orientation"]
+        comet_data.loc[nan_rows, "orientation"] = orientation_from_direction
 
         self.comet_data = comet_data
         return comet_data
@@ -125,7 +101,7 @@ class MTanalyzer():
         all_events_data = pd.DataFrame()
         all_move_data = pd.DataFrame()
 
-        for track_nb, track in enumerate(self.mat_data["tracksFinal"]):
+        for track_nb, track in enumerate(self.comet_data_mat["tracksFinal"]):
             # check if the current track is a compound track (from coordinate array)
             # the analysis of that is not implemented at the moment!
             if len(track[0][1]) > 1:
@@ -164,6 +140,9 @@ class MTanalyzer():
                                         columns=("frame", "x", "y"))
             coords_data["track_nb"] = track_nb
 
+            # make sure that coords data is sorted ascendingly by frame
+            coords_data.sort_values("frame", inplace=True)
+
             move_data = copy.copy(coords_data)
             coords_data_start = coords_data.iloc[:-1].reset_index()
             coords_data_end = coords_data.iloc[1:].reset_index()
@@ -195,7 +174,7 @@ class MTanalyzer():
         return image_averaged, image
 
     def get_neurite_labels_of_all_comet_points(self, comet_data,
-                                               labeled_threshold_image,
+                                               thresholded_image_labeled,
                                                timeframe_neurites_labeled):
         """
         for each comet check which label in the thresholded image it corresponds to
@@ -204,7 +183,7 @@ class MTanalyzer():
         then set the label to np.nan
         however, 0 labels stay
         """
-        all_comet_labels = labeled_threshold_image[comet_data["x"].values.astype(int),
+        all_comet_labels = thresholded_image_labeled[comet_data["x"].values.astype(int),
                                                     comet_data["y"].values.astype(int)]
         neurite_labels = np.unique(timeframe_neurites_labeled)
         # set comet labels whch do not correspond to a neurite to nan
@@ -221,23 +200,23 @@ class MTanalyzer():
         def get_most_common_neurite_label(data):
             count_data = copy.copy(data)
             if len(count_data.loc[np.isnan(count_data["neurite"])]) > 0:
-                label = np.nan
+                most_common_label = np.nan
             else:
                 count_data = count_data.loc[count_data["neurite"] != 0]
                 if len(count_data) == 0:
-                    label = np.nan
+                    most_common_label = np.nan
                 else:
-                    label_idx = np.argmax(count_data["neurite"].count())
-                    label = count_data.iloc[label_idx]["neurite"]
-            labels = pd.Series([label] * len(data))
-            return labels
+                    label_counts = count_data["neurite"].value_counts()
+                    most_common_label_idx = np.argmax(label_counts)
+                    most_common_label = label_counts.index.values[most_common_label_idx]
+            most_common_label_list = pd.Series([most_common_label] * len(data))
+            return most_common_label_list
 
         new_comet_neurite_labels = comet_data.groupby("track_nb").apply(get_most_common_neurite_label)
         return new_comet_neurite_labels.values
 
     def add_closest_neurite_point_to_comet_data(self, comet_data,
                                                 image_neurites_labeled,
-                                                distance_for_neurite_direction,
                                                 search_radius_start,
                                                 search_radius_step,
                                                 max_search_radius):
@@ -246,7 +225,6 @@ class MTanalyzer():
         """
         def get_closest_neurite_point(one_comet_point,
                                       image_neurites_labeled,
-                                      distance_for_neurite_direction,
                                       search_radius_start,
                                       search_radius_step,
                                       max_search_radius):
@@ -263,7 +241,7 @@ class MTanalyzer():
                 if found_points:
                     continue_expanding_radius = False
                 x_slice = slice(start_point[0] - search_radius,
-                                start_point[1] + search_radius)
+                                start_point[0] + search_radius)
                 y_slice = slice(start_point[1] - search_radius,
                                 start_point[1] + search_radius)
                 search_area = image_neurites_labeled[x_slice,
@@ -292,7 +270,6 @@ class MTanalyzer():
         closest_neurite_points = new_comet_data.apply(get_closest_neurite_point,
                                                       axis = 1,
                                                       args=(image_neurites_labeled,
-                                                            distance_for_neurite_direction,
                                                             search_radius_start,
                                                             search_radius_step,
                                                             max_search_radius))
@@ -302,6 +279,146 @@ class MTanalyzer():
         new_comet_data["closest_neurite_point_x"] = closest_neurite_points[:, 0]
         new_comet_data["closest_neurite_point_y"] = closest_neurite_points[:, 1]
         return new_comet_data
+
+    def get_comet_orientation(self, data, all_sorted_points):
+        """
+        Get comet orientation based on the index of the closest neurite point
+        in the neurite skeleton, at the beginning and end of the comet
+        """
+        closest_neurite_points = np.array((data["closest_neurite_point_x"],
+                                          data["closest_neurite_point_y"])).T
+        closest_neurite_points = closest_neurite_points
+        neurite = data["neurite"].iloc[0]
+        all_sorted_points_neurite = all_sorted_points[neurite]
+        # find the first and last closest neurite point of the comet which are
+        # part of the correct neurite
+        start_index = 0
+        end_index = -1
+        start_point_index = []
+        end_point_index= []
+        while True:
+            start_neurite_point = closest_neurite_points[start_index]
+            end_neurite_point = closest_neurite_points[end_index]
+            for all_sorted_points_branch in all_sorted_points_neurite:
+                all_sorted_points_branch_x = all_sorted_points_branch[:,0]
+                all_sorted_points_branch_y = all_sorted_points_branch[:,1]
+                # only update start or end point index
+                # if it was not found already
+                # this way start and end point can be on different branches
+                # and still both be found
+                if len(start_point_index) == 0:
+                    start_point_index = np.where((all_sorted_points_branch_x == start_neurite_point[0]) &
+                                                 (all_sorted_points_branch_y == start_neurite_point[1]))[0]
+                if len(end_point_index) == 0:
+                    end_point_index = np.where((all_sorted_points_branch_x == end_neurite_point[0]) &
+                                                 (all_sorted_points_branch_y == end_neurite_point[1]))[0]
+                if (len(start_point_index) > 0) & (len(end_point_index) > 0):
+                    break
+            if (len(start_point_index) > 0) & (len(end_point_index) > 0):
+                start_point_index = start_point_index[0]
+                end_point_index = end_point_index[0]
+                break
+            # if start point was not found, go one step further
+            if len(start_point_index) == 0:
+                start_index += 1
+            # if end point was not found, go one step back
+            if len(end_point_index) == 0:
+                end_index -= 1
+            if (start_index + abs(end_index)) >= len(data):
+                break
+        point_index_diff = end_point_index - start_point_index
+        # if the index difference is positive, the comet moved towards the
+        # neurite tip, and therefore the microtubule is plus end out
+        if point_index_diff > 0:
+            orientation = "plus-end-out"
+        elif point_index_diff < 0:
+            # if the index difference is negative, the comet moved towards the
+            # soma, and therefore the microtubule is minus end out (plus end in)
+            orientation = "minus-end-out"
+        else:
+            # if the index difference is 0, or there are not two points of
+            # the comet on the correct neurite,
+            # it is not clear in which direction
+            # the comet moved (e.g. perpendicular to the neurite; or just
+            # ended or started on the neurite but then moved to another neurite)
+            orientation = None
+        orientation_list = [orientation] * len(data)
+        return orientation_list
+
+    def get_comet_orientation_from_comparing_direction_to_neurite(self, comet_data,
+                                                                  all_sorted_points,
+                                                                  distance_for_neurite_direction,
+                                                                  distance_for_comet_direction,
+                                                                  min_angle_difference=20):
+        """
+
+        :param min_angle_difference: Minimum difference from 90° for an angle
+                                    difference to be considered to be indicating
+                                    a minus-end-out or plus-end-out microtubule
+                                    if it is not different enough,
+                                    the orientation will be set as None for
+                                    that angle difference
+        """
+        # copy comet data to keep the original unchanged
+        comet_data_tmp = copy.copy(comet_data)
+        # get orientation of comets from comparing comet direction with neurite
+        # direction
+        comet_direction_data = self.get_comet_direction_data(comet_data_tmp,
+                                                        distance_for_comet_direction)
+        comet_data_tmp["direction_x"] = comet_direction_data[:, 0]
+        comet_data_tmp["direction_y"] = comet_direction_data[:, 1]
+
+        closest_neurite_points = np.array((comet_data_tmp["closest_neurite_point_x"],
+                                          comet_data_tmp["closest_neurite_point_y"])).T
+        closest_neurite_points = [tuple([int(neurite_point[0]),
+                                        int(neurite_point[1])])
+                                  for neurite_point in closest_neurite_points]
+
+        neurite_direction_data = self.get_neurite_direction(all_sorted_points,
+                                                            distance_for_neurite_direction)
+        neurite_directions = neurite_direction_data.loc[closest_neurite_points]
+        comet_data_tmp["neurite_direction_x"] = neurite_directions["direction_x"].values
+        comet_data_tmp["neurite_direction_y"] = neurite_directions["direction_y"].values
+
+        # get the angle between each of the neurite directions and the direction
+        # of the comet, get the direction from the angle
+        neurite_angles = self.get_angles_from_directions(comet_data_tmp["neurite_direction_x"],
+                                                         comet_data_tmp["neurite_direction_y"])
+        comet_angles = self.get_angles_from_directions(comet_data_tmp["direction_x"],
+                                                       comet_data_tmp["direction_y"])
+
+        comet_data_tmp["neurite_angle"] = neurite_angles
+        comet_data_tmp["angle"] = comet_angles
+        # since the direction of the difference does not matter,
+        # use the absolute difference
+        unchanged_angle_difference = (comet_data_tmp["angle"] -
+                                      comet_data_tmp["neurite_angle"]).abs()
+        # The relevant difference of angles is max. 180 degrees (opposing direction)
+        # therefore subtract 360 from the angle difference and then take
+        # the smallest of the two differences
+        changed_angle_difference = (unchanged_angle_difference - 360).abs()
+
+        final_angle_difference = np.minimum(unchanged_angle_difference,
+                                            changed_angle_difference)
+        comet_data_tmp["angle_difference"] = final_angle_difference
+        comet_data_tmp["orientation"] = None
+        # do not evaluate microtubule orientation close to the cut off point
+        comet_data_tmp.loc[final_angle_difference < (90 - min_angle_difference),
+                           "orientation"] = "plus-end-out"
+        comet_data_tmp.loc[final_angle_difference > (90 + min_angle_difference),
+                           "orientation"] = "minus-end-out"
+
+        # print(comet_data_tmp.loc[67, ["neurite_direction_x",
+        #                               "neurite_direction_y",
+        #                               "direction_x",
+        #                               "direction_y",
+        #                               "neurite_angle", "angle",
+        #                               "angle_difference", "orientation"]])
+
+        all_directions = comet_data_tmp.groupby("track_nb").apply(self.get_most_common_orientation)
+
+        comet_data_tmp["orientation"] = np.concatenate(all_directions.values)
+        return comet_data_tmp
 
     def get_neurite_direction(self, all_sorted_points,
                               distance_for_neurite_direction):
@@ -316,15 +433,24 @@ class MTanalyzer():
         for neurite, sorted_points in all_sorted_points.items():
             # go through each branch
             for sorted_points_branch in sorted_points:
+                # get neurite direction as average from left to right
+                # of current point
                 neurite_direction = np.subtract(sorted_points_branch[distance_for_neurite_direction:],
                                                 sorted_points_branch[:-distance_for_neurite_direction])
-                # for last three points of neurite add direction of last point
+                points_before = int(math.floor(distance_for_neurite_direction)/2)
+                points_after = distance_for_neurite_direction - points_before
+                # for first/last points of neurite add
+                # direction of first/last point
                 # for which direction could be calculated
-                direction_added_to_end = np.repeat(np.array([neurite_direction[-1]]),
-                                                   distance_for_neurite_direction,
+                direction_added_to_start = np.repeat(np.array([neurite_direction[0]]),
+                                                   points_before,
                                                    axis=0)
-                neurite_direction = np.concatenate([neurite_direction,
-                                                   direction_added_to_end])
+                direction_added_to_end = np.repeat(np.array([neurite_direction[-1]]),
+                                                   points_after,
+                                                   axis=0)
+                neurite_direction = np.concatenate([direction_added_to_start,
+                                                    neurite_direction,
+                                                    direction_added_to_end])
                 new_data = pd.DataFrame()
                 new_data["x"] = sorted_points_branch[:,0]
                 new_data["y"] = sorted_points_branch[:,1]
@@ -375,16 +501,36 @@ class MTanalyzer():
         """
         angles = np.rad2deg(np.arctan(np.abs(directions_y)/
                                       np.abs(directions_x)))
-        angle_change_x = ((directions_y >= 0) & (directions_x < 0)) * 90
-        angle_change_y = ((directions_y < 0) & (directions_x >= 0)) * 270
-        angle_change_xy = ((directions_y < 0) & (directions_x < 0)) * 180
+        angle_change_x = ((directions_y >= 0) & (directions_x < 0)) * 270
+        angle_change_y = ((directions_y < 0) & (directions_x >= 0)) * 90
+        angle_change_baseline = ((directions_y >= 0) & (directions_x >= 0)) * 90
+        angle_change_xy = ((directions_y < 0) & (directions_x < 0)) * 270
 
-        angles += angle_change_x + angle_change_y + angle_change_xy
+        angle_factor = (((directions_x >= 0) & (directions_y >= 0)) |
+                        ((directions_x < 0) & (directions_y < 0)) ) * -1
+        angle_factor.loc[angle_factor == 0] = 1
+
+        angles *= angle_factor
+        angles += (angle_change_x + angle_change_y + angle_change_xy +
+                   angle_change_baseline)
         return angles
 
-    def get_most_common_direction(self, data):
-        count_data = copy.copy(data)
-        direction_idx = np.argmax(count_data["anterograde"].count())
-        direction = count_data.iloc[direction_idx]["anterograde"]
-        directions = [direction] * len(data)
-        return directions
+    def get_most_common_orientation(self, data, min_fraction = 0.65):
+        """
+        Get most common orientation present in at least 60% of frames.
+        """
+        orientation_counts = data["orientation"].value_counts()
+        # if only nan values are present, there are no counts
+        # (nan is not counted)
+        if len(orientation_counts) == 0:
+            return [None] * len(data)
+        orientation_counts /= len(data)
+        most_common_orientation = orientation_counts.loc[orientation_counts
+                                                         > min_fraction].index.values
+        # if no orientation fulfills the criteria, return nan
+        if len(most_common_orientation) == 0:
+            return [None] * len(data)
+
+        most_common_orientation = most_common_orientation[0]
+        most_common_orientation_list = [most_common_orientation] * len(data)
+        return most_common_orientation_list
