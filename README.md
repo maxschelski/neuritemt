@@ -11,6 +11,8 @@ The package analyzes microtubule (MT) orientation in neurites based on the outpu
 > pip install -e .
 4. Follow the installation for pyneurite (https://github.com/maxschelski/pyneurite)
 5. Use the package
+> import neuritemt.mtanalyzer
+> 
 > from scipy import io
 > 
 > comet_data_mat = io.loadmat(file_path_to_mat_file)
