@@ -3,6 +3,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
 import copy
+from scipy import ndimage
 from skimage.morphology import disk
 from skimage import morphology as morph
 from skimage import filters
@@ -12,8 +13,9 @@ import math
 
 class MTanalyzer():
 
-    def __init__(self, comet_data_mat):
+    def __init__(self, comet_data_mat, frames_per_timepoint=None):
         self.comet_data_mat = comet_data_mat
+        self.frames_per_timepoint = frames_per_timepoint
 
     def analyze_orientation(self, distance_for_neurite_direction = 5,
                             distance_for_comet_direction=3,
@@ -28,6 +30,9 @@ class MTanalyzer():
         """
 
         comet_data = self.get_comet_data()
+
+        # if frames_per_timepoint != None:
+
 
         image_averaged, image = self.get_images_from_comets(comet_data,
                                                             (512, 512))
@@ -159,7 +164,50 @@ class MTanalyzer():
         return all_move_data
 
 
-    def get_images_from_comets(self, comet_data, image_shape):
+    def get_border_coords(self, image):
+        img_shape = image.shape
+        border_coords_x = ([0] * img_shape[1] +
+                           [-1] *img_shape[1] +
+                           list(range(img_shape[0])) +
+                           list(range(img_shape[0]))
+                           )
+        border_coords_y = (list(range(img_shape[1])) +
+                           list(range(img_shape[1])) +
+                           [0] * img_shape[0] +
+                           [-1] * img_shape[0]
+                           )
+        return np.array(border_coords_x), np.array(border_coords_y)
+
+
+    def get_flood_filled_image_from_border(self, image):
+            # flood fill image from border until all border pixels are 1
+            # first get border coordinates as tuple for x and y
+            filled_image = copy.copy(image)
+            border_coords_zero = self.get_border_coords(image)
+            while True:
+                border_values = filled_image[border_coords_zero[0],
+                                             border_coords_zero[1]]
+                border_coords_zero_idx = np.where(border_values == 0)[0]
+                if len(border_coords_zero_idx) == 0:
+                    break
+                border_coords_zero = (border_coords_zero[0][border_coords_zero_idx],
+                                      border_coords_zero[1][border_coords_zero_idx])
+                # fill image from first point in border coords zero
+                filled_image = morph.flood_fill(filled_image,
+                                                (border_coords_zero[0][0],
+                                                 border_coords_zero[1][0]),
+                                                True)
+            return filled_image
+
+    def get_nb_of_hole_px(self, image):
+        filled_image = self.get_flood_filled_image_from_border(image)
+        number_hole_px = len(np.where(filled_image == 0)[0])
+        return number_hole_px
+
+    def get_images_from_comets(self, comet_data, image_shape,
+                               min_closing_radius = 4,
+                               max_closing_radius = 10,
+                               max_steps_without_improvement = 2):
         """
         Create 2D image from points in comet traces.
         """
@@ -167,10 +215,67 @@ class MTanalyzer():
         image[comet_data["x"].astype(int),comet_data["y"].astype(int)] = 1
         image_averaged = filters.rank.mean(image, disk(5))
         image = image > 0
-        # iteratively increase closing radius (from 1 to max of 10) until
-        # no holes can be closed anymore and
-        # no additional islands can be removed
-        image = morph.binary_closing(image, disk(5))
+
+        # test border coordinate function once
+        # (needed to flood fill image from border)
+        assert np.array_equal(self.get_border_coords(np.zeros((6, 4))),
+                              (np.array([0,0,0,0,
+                                         -1,-1,-1,-1,
+                                         0,1,2,3,4,5,
+                                         0,1,2,3,4,5]),
+                               np.array([0,1,2,3,
+                                         0,1,2,3,
+                                         0,0,0,0,0,0,
+                                         -1,-1,-1,-1,-1,-1]))
+                              )
+
+        # iteratively increase closing radius (from min to max) until
+        # no additional islands are removed (number of labels stays the same)
+        # & no holes are filled (identified by reduction values not reached
+        # after flood-filling image from border)
+        label_structure = [[1,1,1],
+                           [1,1,1],
+                           [1,1,1]]
+        _, ref_nb_labels = ndimage.label(image, structure=label_structure)
+        ref_nb_hole_px = self.get_nb_of_hole_px(image)
+        steps_without_improvement = 0
+        best_closing_radius = min_closing_radius
+
+        for closing_radius in range(min_closing_radius, max_closing_radius+1):
+            test_image = morph.binary_closing(image, disk(closing_radius))
+            # remove very small objects to not have
+            # to connect every tiny object
+            test_image = morph.remove_small_objects(test_image, 3,
+                                                    connectivity=2)
+
+            # check whether the number of islands (nb labels) is reduced
+            labels_reduced = False
+            _, new_nb_labels = ndimage.label(test_image,
+                                             structure=label_structure)
+            if new_nb_labels < ref_nb_labels:
+                labels_reduced = True
+                ref_nb_labels = new_nb_labels
+
+            # check if closing the iamge led to fewer hole px
+            # in flood filled image
+            fewer_hole_px = False
+            new_nb_hole_px = self.get_nb_of_hole_px(test_image)
+            if new_nb_hole_px < ref_nb_hole_px:
+                fewer_hole_px = True
+            ref_nb_hole_px = new_nb_hole_px
+
+            # update best closing radius if there was an improvement in one
+            # of the two categories
+            if labels_reduced | fewer_hole_px:
+                best_closing_radius = closing_radius
+            else:
+                steps_without_improvement += 1
+
+            if steps_without_improvement > max_steps_without_improvement:
+                break
+
+        image = morph.binary_closing(image, disk(best_closing_radius))
+
         return image_averaged, image
 
     def get_neurite_labels_of_all_comet_points(self, comet_data,
