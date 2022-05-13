@@ -13,11 +13,24 @@ import math
 
 class MTanalyzer():
 
-    def __init__(self, comet_data_mat, frames_per_timepoint=None):
+    def __init__(self, comet_data_mat, frames_per_timepoint=None,
+                 image_dim=None,
+                   min_closing_radius = 4,
+                   max_closing_radius = 10,
+                   max_steps_without_improvement = 2,
+                 min_branch_size = 5,
+                 search_radius_start=3, search_radius_step=2,
+                 max_search_radius = 100,
+                 distance_for_neurite_direction = 5,
+                 distance_for_comet_direction = 3,
+                 min_angle_difference=20
+                 ):
         """
 
-        :param comet_data_mat:
-        :param frames_per_timepoint: Number of frames that were recorded at
+        :param comet_data_mat:  _tracking_result.mat file in "tracks" folder
+                                of output of utrack
+                                (loaded with scipy.io.load_mat)
+        :param frames_per_timepoint:  Number of frames that were recorded at
                                     each timepoint. Comet tracks will be split
                                     so that comets from different timepoints
                                     will be analyzed separately.
@@ -29,17 +42,49 @@ class MTanalyzer():
                                     which is repeated at other timepoints
                                     (e.g. 6 frames (1/s) every 60s would mean
                                     that frames_per_timepoint = 6)
+        :param min_closing_radius:
+        :param max_closing_radius:
+        :param max_steps_without_improvement:
+        :param min_branch_size: minimim branch length in the skeleton to be kept
+                                every branch with fewer pixels than that will be removed
+        :param search_radius_start: parameters to find the closest neurite points for each tracked comet
+                                    starting search radius of disk in pixels
+        :param search_radius_step: parameters to find the closest neurite points for each tracked comet
+                                    step size by which radius of disk in pixels is increased during search
+        :param max_search_radius: parameters to find the closest neurite points for each tracked comet
+                                    maximum search radius of disk in pixels
+        :param distance_for_neurite_direction:
+        :param distance_for_comet_direction:
+        :param min_angle_difference:
         """
+        if type(image_dim) == type(None):
+            self.image_dim = (512,521)
+
         self.comet_data_mat = comet_data_mat
         self.frames_per_timepoint = frames_per_timepoint
 
-    def analyze_orientation(self, distance_for_neurite_direction = 5,
-                            distance_for_comet_direction=3,
-                            search_radius_start = 3,
-                            search_radius_step = 2,
-                            max_search_radius = 100,
-                            min_branch_size=5,
-                            branchLengthToKeep=5):
+        #------get_images_from_comets------
+        self.min_closing_radius = min_closing_radius
+        self.max_closing_radius = max_closing_radius
+        self.max_steps_without_improvement = max_steps_without_improvement
+
+        # ------neuriteanalyzer------
+        self.min_branch_size = min_branch_size
+
+        # ------add_closest_neurite_point_to_comet_data------
+        # parameters to find the closest neurite points for each tracked comet
+        self.search_radius_start = search_radius_start
+        self.search_radius_step = search_radius_step
+        self.max_search_radius = max_search_radius
+
+        # ------get_comet_orientation_from_comparing_direction_to_neurite------
+        self.distance_for_neurite_direction = distance_for_neurite_direction
+        self.distance_for_comet_direction = distance_for_comet_direction
+
+        #g------et_comet_orientation_from_comparing_direction_to_neurite------
+        self.min_angle_difference = min_angle_difference
+
+    def analyze_orientation(self):
         """
         Analyze microtubule orientation based on mat file generated
         by utrack / plustiptracker (Danuser lab)
@@ -50,7 +95,8 @@ class MTanalyzer():
         # split comet_data by frame
         if self.frames_per_timepoint != None:
             # adding new column with timepoint
-            comet_data["timepoint"] = comet_data.apply(lambda x: math.floor((x["frame"]-1) / self.frames_per_timepoint),
+            comet_data["timepoint"] = comet_data.apply(lambda x: math.floor((x["frame"]-1) /
+                                                                             self.frames_per_timepoint),
                                                            axis=1)
             # split comet data by resetting the frame every x frames
             comet_data["frame"] = comet_data.apply(lambda x: (x["frame"]-1) % self.frames_per_timepoint,
@@ -59,12 +105,12 @@ class MTanalyzer():
             comet_data["timepoint"] = 0
 
         image_averaged, image = self.get_images_from_comets(comet_data,
-                                                            (512, 512))
+                                                            self.image_dim)
 
         analyzer = NeuriteAnalyzer(image_thresh=image,
                                    image=image_averaged)
-        analyzer.minBranchSize = min_branch_size
-        analyzer.branchLengthToKeep = branchLengthToKeep
+        analyzer.minBranchSize = self.min_branch_size
+        analyzer.branchLengthToKeep = self.min_branch_size
         analyzer.get_clean_thresholded_image(find_threshold=False,
                                              connect_islands=False,
                                              separate_neurites=True,
@@ -95,10 +141,7 @@ class MTanalyzer():
         # closest to the start point of the comet
 
         comet_data = self.add_closest_neurite_point_to_comet_data(comet_data,
-                                                                  neurites_labeled,
-                                                                  search_radius_start,
-                                                                  search_radius_step,
-                                                                  max_search_radius)
+                                                                  neurites_labeled)
         # check whether from first to last comet point the closest neurite point
         # is earlier in the sorted array (closer to the soma / minus-end-out)
         # or later in the sorted array (closer to neurite tip / plus-end-out)
@@ -112,9 +155,7 @@ class MTanalyzer():
         # check whether a clear comet direction can be found from
         # comparing the comet direction to neurite direction
         comet_data_orientation_from_direction = self.get_comet_orientation_from_comparing_direction_to_neurite(comet_data,
-                                                                                                               all_sorted_points,
-                                                                                                               distance_for_neurite_direction,
-                                                                                                               distance_for_comet_direction)
+                                                                                                               all_sorted_points)
         nan_rows = comet_data["orientation"].isnull()
         orientation_from_direction = comet_data_orientation_from_direction.loc[nan_rows,
                                                                                "orientation"]
@@ -230,10 +271,7 @@ class MTanalyzer():
         number_hole_px = len(np.where(filled_image == 0)[0])
         return number_hole_px
 
-    def get_images_from_comets(self, comet_data, image_shape,
-                               min_closing_radius = 4,
-                               max_closing_radius = 10,
-                               max_steps_without_improvement = 2):
+    def get_images_from_comets(self, comet_data, image_shape):
         """
         Create 2D image from points in comet traces.
         """
@@ -265,9 +303,9 @@ class MTanalyzer():
         _, ref_nb_labels = ndimage.label(image, structure=label_structure)
         ref_nb_hole_px = self.get_nb_of_hole_px(image)
         steps_without_improvement = 0
-        best_closing_radius = min_closing_radius
+        best_closing_radius = self.min_closing_radius
 
-        for closing_radius in range(min_closing_radius, max_closing_radius+1):
+        for closing_radius in range(self.min_closing_radius, self.max_closing_radius+1):
             test_image = morph.binary_closing(image, disk(closing_radius))
             # remove very small objects to not have
             # to connect every tiny object
@@ -297,7 +335,7 @@ class MTanalyzer():
             else:
                 steps_without_improvement += 1
 
-            if steps_without_improvement > max_steps_without_improvement:
+            if steps_without_improvement > self.max_steps_without_improvement:
                 break
 
         image = morph.binary_closing(image, disk(best_closing_radius))
@@ -347,23 +385,17 @@ class MTanalyzer():
         return new_comet_neurite_labels.values
 
     def add_closest_neurite_point_to_comet_data(self, comet_data,
-                                                image_neurites_labeled,
-                                                search_radius_start,
-                                                search_radius_step,
-                                                max_search_radius):
+                                                image_neurites_labeled):
         """
         For each point of each comet get the closest neurite point.
         """
         def get_closest_neurite_point(one_comet_point,
-                                      image_neurites_labeled,
-                                      search_radius_start,
-                                      search_radius_step,
-                                      max_search_radius):
+                                      image_neurites_labeled):
             neurite_label = one_comet_point["neurite"].astype(int)
             start_point = one_comet_point[["x", "y"]].astype(int).values
             continue_expanding_radius = True
             found_points = False
-            search_radius = search_radius_start
+            search_radius = self.search_radius_start
             while continue_expanding_radius:
                 # continue expanding radius for possible neurite points
                 # for one more than needed to get a hit
@@ -380,15 +412,15 @@ class MTanalyzer():
                                                         neurite_label))
                 if len(possible_neurite_points[0]) > 0:
                     found_points = True
-                search_radius += search_radius_step
-                if search_radius > max_search_radius:
+                search_radius += self.search_radius_step
+                if search_radius > self.max_search_radius:
                     break
-            if search_radius > max_search_radius:
+            if search_radius > self.max_search_radius:
                 return [np.nan, np.nan]
             possible_neurite_points[0] += start_point[0] - (search_radius -
-                                                            search_radius_step)
+                                                            self.search_radius_step)
             possible_neurite_points[1] += start_point[1] - (search_radius -
-                                                            search_radius_step)
+                                                            self.search_radius_step)
             get_closest_point = generalTools.getClosestPoint
             closest_neurite_point = get_closest_point(possible_neurite_points,
                                                       np.expand_dims(start_point,
@@ -399,10 +431,7 @@ class MTanalyzer():
         new_comet_data.set_index(["timepoint", "track_nb"], inplace=True)
         closest_neurite_points = new_comet_data.apply(get_closest_neurite_point,
                                                       axis = 1,
-                                                      args=(image_neurites_labeled,
-                                                            search_radius_start,
-                                                            search_radius_step,
-                                                            max_search_radius))
+                                                      args=[image_neurites_labeled])
         # transform from list of 1D numpy array into 2D numpy array
         closest_neurite_points = np.stack(closest_neurite_points, axis=0)
 
@@ -476,10 +505,7 @@ class MTanalyzer():
         return orientation_list
 
     def get_comet_orientation_from_comparing_direction_to_neurite(self, comet_data,
-                                                                  all_sorted_points,
-                                                                  distance_for_neurite_direction,
-                                                                  distance_for_comet_direction,
-                                                                  min_angle_difference=20):
+                                                                  all_sorted_points):
         """
 
         :param min_angle_difference: Minimum difference from 90° for an angle
@@ -494,7 +520,7 @@ class MTanalyzer():
         # get orientation of comets from comparing comet direction with neurite
         # direction
         comet_direction_data = self.get_comet_direction_data(comet_data_tmp,
-                                                             distance_for_comet_direction)
+                                                             self.distance_for_comet_direction)
         comet_data_tmp["direction_x"] = comet_direction_data[:, 0]
         comet_data_tmp["direction_y"] = comet_direction_data[:, 1]
 
@@ -505,8 +531,7 @@ class MTanalyzer():
                                         int(neurite_point[1])])
                                   for neurite_point in closest_neurite_points]
 
-        neurite_direction_data = self.get_neurite_direction(all_sorted_points,
-                                                            distance_for_neurite_direction)
+        neurite_direction_data = self.get_neurite_direction(all_sorted_points)
         neurite_directions = neurite_direction_data.loc[closest_neurite_points]
         comet_data_tmp["neurite_direction_x"] = neurite_directions["direction_x"].values
         comet_data_tmp["neurite_direction_y"] = neurite_directions["direction_y"].values
@@ -534,9 +559,9 @@ class MTanalyzer():
         comet_data_tmp["angle_difference"] = final_angle_difference
         comet_data_tmp["orientation"] = None
         # do not evaluate microtubule orientation close to the cut off point
-        comet_data_tmp.loc[final_angle_difference < (90 - min_angle_difference),
+        comet_data_tmp.loc[final_angle_difference < (90 - self.min_angle_difference),
                            "orientation"] = "plus-end-out"
-        comet_data_tmp.loc[final_angle_difference > (90 + min_angle_difference),
+        comet_data_tmp.loc[final_angle_difference > (90 + self.min_angle_difference),
                            "orientation"] = "minus-end-out"
 
         # print(comet_data_tmp.loc[67, ["neurite_direction_x",
@@ -551,8 +576,7 @@ class MTanalyzer():
         comet_data_tmp["orientation"] = np.concatenate(all_directions.values)
         return comet_data_tmp
 
-    def get_neurite_direction(self, all_sorted_points,
-                              distance_for_neurite_direction):
+    def get_neurite_direction(self, all_sorted_points):
         """
         get the direction of each neurite at each point
         calculate dx and dy over defined number of points
@@ -566,10 +590,10 @@ class MTanalyzer():
             for sorted_points_branch in sorted_points:
                 # get neurite direction as average from left to right
                 # of current point
-                neurite_direction = np.subtract(sorted_points_branch[distance_for_neurite_direction:],
-                                                sorted_points_branch[:-distance_for_neurite_direction])
-                points_before = int(math.floor(distance_for_neurite_direction)/2)
-                points_after = distance_for_neurite_direction - points_before
+                neurite_direction = np.subtract(sorted_points_branch[self.distance_for_neurite_direction:],
+                                                sorted_points_branch[:-self.distance_for_neurite_direction])
+                points_before = int(math.floor(self.distance_for_neurite_direction)/2)
+                points_after = self.distance_for_neurite_direction - points_before
                 # for first/last points of neurite add
                 # direction of first/last point
                 # for which direction could be calculated
