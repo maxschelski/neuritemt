@@ -14,6 +14,22 @@ import math
 class MTanalyzer():
 
     def __init__(self, comet_data_mat, frames_per_timepoint=None):
+        """
+
+        :param comet_data_mat:
+        :param frames_per_timepoint: Number of frames that were recorded at
+                                    each timepoint. Comet tracks will be split
+                                    so that comets from different timepoints
+                                    will be analyzed separately.
+                                    Since multiple high frequency frames
+                                    are necessary for comet tracing,
+                                    multi-position acquisition or long term
+                                    imaging needs acquisition of a few
+                                    frames at high frequency at one timepoint
+                                    which is repeated at other timepoints
+                                    (e.g. 6 frames (1/s) every 60s would mean
+                                    that frames_per_timepoint = 6)
+        """
         self.comet_data_mat = comet_data_mat
         self.frames_per_timepoint = frames_per_timepoint
 
@@ -31,8 +47,16 @@ class MTanalyzer():
 
         comet_data = self.get_comet_data()
 
-        # if frames_per_timepoint != None:
-
+        # split comet_data by frame
+        if self.frames_per_timepoint != None:
+            # adding new column with timepoint
+            comet_data["timepoint"] = comet_data.apply(lambda x: math.floor((x["frame"]-1) / self.frames_per_timepoint),
+                                                           axis=1)
+            # split comet data by resetting the frame every x frames
+            comet_data["frame"] = comet_data.apply(lambda x: (x["frame"]-1) % self.frames_per_timepoint,
+                                                       axis=1)
+        else:
+            comet_data["timepoint"] = 0
 
         image_averaged, image = self.get_images_from_comets(comet_data,
                                                             (512, 512))
@@ -42,9 +66,9 @@ class MTanalyzer():
         analyzer.minBranchSize = min_branch_size
         analyzer.branchLengthToKeep = branchLengthToKeep
         analyzer.get_clean_thresholded_image(find_threshold=False,
-                                              connect_islands=False,
-                                              separate_neurites=True,
-                                              separate_neurites_by_opening=False)
+                                             connect_islands=False,
+                                             separate_neurites=True,
+                                             separate_neurites_by_opening=False)
         analyzer.get_neurite_skeletons()
         all_sorted_points = analyzer.get_neurites()
         thresholded_image_labeled = analyzer.timeframe_thresholded_neurites_labeled
@@ -58,7 +82,7 @@ class MTanalyzer():
         comet_data["neurite"] = neurite_labels
 
         # sort data before asigning values to prevent wrong assignments
-        comet_data.sort_values(["track_nb", "frame"], inplace=True)
+        comet_data.sort_values(["timepoint", "track_nb", "frame"], inplace=True)
 
         comet_data["neurite"] = self.get_most_common_neurite_labels_of_comets(comet_data)
 
@@ -66,20 +90,22 @@ class MTanalyzer():
         comet_data = comet_data.loc[comet_data["neurite"] != 0.0]
         comet_data = comet_data.loc[~ (np.isnan(comet_data["neurite"]))]
 
+
         # then get the point of the correct neurite (from the skeleton)
         # closest to the start point of the comet
 
         comet_data = self.add_closest_neurite_point_to_comet_data(comet_data,
-                                                                 neurites_labeled,
-                                                                 search_radius_start,
-                                                                 search_radius_step,
-                                                                 max_search_radius)
+                                                                  neurites_labeled,
+                                                                  search_radius_start,
+                                                                  search_radius_step,
+                                                                  max_search_radius)
         # check whether from first to last comet point the closest neurite point
         # is earlier in the sorted array (closer to the soma / minus-end-out)
         # or later in the sorted array (closer to neurite tip / plus-end-out)
 
-        orientation_data = comet_data.groupby("track_nb").apply(self.get_comet_orientation,
-                                                                all_sorted_points)
+        orientation_data = comet_data.groupby(["timepoint",
+                                               "track_nb"]).apply(self.get_comet_orientation,
+                                                                  all_sorted_points)
         comet_data["orientation"] = np.concatenate(orientation_data.values)
 
         # for comet orientation that could not be determined
@@ -317,7 +343,7 @@ class MTanalyzer():
             most_common_label_list = pd.Series([most_common_label] * len(data))
             return most_common_label_list
 
-        new_comet_neurite_labels = comet_data.groupby("track_nb").apply(get_most_common_neurite_label)
+        new_comet_neurite_labels = comet_data.groupby(["timepoint", "track_nb"]).apply(get_most_common_neurite_label)
         return new_comet_neurite_labels.values
 
     def add_closest_neurite_point_to_comet_data(self, comet_data,
@@ -333,7 +359,6 @@ class MTanalyzer():
                                       search_radius_start,
                                       search_radius_step,
                                       max_search_radius):
-            track_nb = one_comet_point.index[0]
             neurite_label = one_comet_point["neurite"].astype(int)
             start_point = one_comet_point[["x", "y"]].astype(int).values
             continue_expanding_radius = True
@@ -371,7 +396,7 @@ class MTanalyzer():
             return closest_neurite_point
 
         new_comet_data = copy.copy(comet_data)
-        new_comet_data.set_index(["track_nb"], inplace=True)
+        new_comet_data.set_index(["timepoint", "track_nb"], inplace=True)
         closest_neurite_points = new_comet_data.apply(get_closest_neurite_point,
                                                       axis = 1,
                                                       args=(image_neurites_labeled,
@@ -469,12 +494,13 @@ class MTanalyzer():
         # get orientation of comets from comparing comet direction with neurite
         # direction
         comet_direction_data = self.get_comet_direction_data(comet_data_tmp,
-                                                        distance_for_comet_direction)
+                                                             distance_for_comet_direction)
         comet_data_tmp["direction_x"] = comet_direction_data[:, 0]
         comet_data_tmp["direction_y"] = comet_direction_data[:, 1]
 
         closest_neurite_points = np.array((comet_data_tmp["closest_neurite_point_x"],
                                           comet_data_tmp["closest_neurite_point_y"])).T
+
         closest_neurite_points = [tuple([int(neurite_point[0]),
                                         int(neurite_point[1])])
                                   for neurite_point in closest_neurite_points]
@@ -520,7 +546,7 @@ class MTanalyzer():
         #                               "neurite_angle", "angle",
         #                               "angle_difference", "orientation"]])
 
-        all_directions = comet_data_tmp.groupby("track_nb").apply(self.get_most_common_orientation)
+        all_directions = comet_data_tmp.groupby(["timepoint","track_nb"]).apply(self.get_most_common_orientation)
 
         comet_data_tmp["orientation"] = np.concatenate(all_directions.values)
         return comet_data_tmp
@@ -593,7 +619,8 @@ class MTanalyzer():
                                               axis=0)])
             return directions
 
-        comet_direction_data = comet_data.groupby(["track_nb"]).apply(get_comet_direction,
+        comet_direction_data = comet_data.groupby(["timepoint",
+                                                   "track_nb"]).apply(get_comet_direction,
                                                                       distance_for_comet_direction)
         comet_direction_data = np.concatenate(comet_direction_data.values, axis=0)
         return comet_direction_data
