@@ -1,5 +1,5 @@
 # neuriteMT
-The package analyzes microtubule (MT) orientation in neurites based on the output from utrack / plustiptracker (Danuser lab; https://github.com/DanuserLab/u-track).
+The package analyzes microtubule (MT) orientation in neurites based on the output from utrack / plustiptracker (Danuser lab; https://github.com/DanuserLab/u-track). It will only work with movies of single neurons including their soma. The soma is needed to get the orientation of neurites and thereby of comet tracks.
 
 # Installation
 
