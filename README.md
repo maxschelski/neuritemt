@@ -21,4 +21,6 @@ The package analyzes microtubule (MT) orientation in neurites based on the outpu
 > 
 > comet_data = analyzer.analyze_orientation()
 
+The comet_data output calculates distance in pixels and time in frames (and therefore speed as pixels/frame). 
+
 For any questions feel free to contact me via E-Mail to max.schelski@googlemail.com.
