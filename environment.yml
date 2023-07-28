@@ -1,0 +1,14 @@
+name: neuritemt
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - pandas=2.0.3
+  - scipy=1.11.1
+  - matplotlib=3.7.2
+  - scikit-image=0.18.1
+  - numpy=1.25.1
+  - opencv=4.6.0
+  - spyder
+  - pip:
+    - opencv-contrib-python
