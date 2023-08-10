@@ -243,7 +243,7 @@ class MTanalyzer():
                     break
 
             neurite_pos = all_lengths[branch_nb][point_index[0]]
-            return pd.Series((neurite_pos, all_lengths[-1], branch_nb))
+            return pd.Series((neurite_pos, all_lengths[branch_nb], branch_nb))
 
         # get position of EB comet within neurite
         all_neurites_lengths = {}
