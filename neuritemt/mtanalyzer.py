@@ -906,7 +906,6 @@ class MTanalyzer():
         if np.any(directions_x==0):
             angles = []
             for direction_x, direction_y in zip(directions_x, directions_y):
-                print(direction_x, direction_y)
                 if direction_x == 0:
                     angles.append(np.rad2deg(np.arctan(0)))
                 else:
