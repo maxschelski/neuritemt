@@ -1,4 +1,6 @@
 import os
+
+import numpy
 from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
@@ -7,14 +9,20 @@ from scipy import ndimage
 from skimage.morphology import disk
 from skimage import morphology as morph
 from skimage import filters
+from skimage import io
 from pyneurite.neuriteanalyzer import NeuriteAnalyzer
 from pyneurite.tools.generaltools import generalTools
+from pyneurite.tools.sortpoints import sortPoints
 import math
+import time
 
 class MTanalyzer():
 
-    def __init__(self, comet_data_mat, frames_per_timepoint=None,
+    def __init__(self, comet_data_mat, raw_image_data=None,
+                 frames_per_timepoint=None,
                  image_dim=None,
+                 analysis_path = None,
+                 image_name =None,
                    min_closing_radius = 4,
                    max_closing_radius = 10,
                    max_steps_without_improvement = 2,
@@ -23,13 +31,19 @@ class MTanalyzer():
                  max_search_radius = 100,
                  distance_for_neurite_direction = 5,
                  distance_for_comet_direction = 3,
-                 min_angle_difference=20
+                 min_angle_difference=20,
+                 remove_zero_areas=False,
                  ):
         """
 
         :param comet_data_mat:  _tracking_result.mat file in "tracks" folder
                                 of output of utrack
                                 (loaded with scipy.io.load_mat)
+        :param raw_image_data: imported tif data used for plus tip tracking
+                                only needed if some parts of the image are 0
+                                (due to registration of data) since then
+                                the plus tip tracker artifically finds
+                                comets around the 0 areas.
         :param frames_per_timepoint:  Number of frames that were recorded at
                                     each timepoint. Comet tracks will be split
                                     so that comets from different timepoints
@@ -42,6 +56,9 @@ class MTanalyzer():
                                     which is repeated at other timepoints
                                     (e.g. 6 frames (1/s) every 60s would mean
                                     that frames_per_timepoint = 6)
+        :param analysis_path: Absolute Path to where analysis files should
+                                be saved (neuron images).
+        :param image_name: Name under which comet images should be saved
         :param min_closing_radius:
         :param max_closing_radius:
         :param max_steps_without_improvement:
@@ -60,13 +77,22 @@ class MTanalyzer():
         if type(image_dim) == type(None):
             self.image_dim = (512,521)
 
+        if type(raw_image_data) != type(None):
+            self.image_dim = tuple(raw_image_data.shape[-2:])
+
         self.comet_data_mat = comet_data_mat
+        self.raw_image_data = raw_image_data
         self.frames_per_timepoint = frames_per_timepoint
 
+        self.analysis_path = analysis_path
+        self.image_name = image_name
+
         #------get_images_from_comets------
+        self.buffer_around_zero_areas = 10
         self.min_closing_radius = min_closing_radius
         self.max_closing_radius = max_closing_radius
         self.max_steps_without_improvement = max_steps_without_improvement
+        self.remove_zero_areas = remove_zero_areas
 
         # ------neuriteanalyzer------
         self.min_branch_size = min_branch_size
@@ -111,20 +137,41 @@ class MTanalyzer():
                                    image=image_averaged)
         analyzer.minBranchSize = self.min_branch_size
         analyzer.branchLengthToKeep = self.min_branch_size
+
         analyzer.get_clean_thresholded_image(find_threshold=False,
                                              connect_islands=False,
                                              separate_neurites=True,
                                              separate_neurites_by_opening=False)
         analyzer.get_neurite_skeletons()
-        all_sorted_points = analyzer.get_neurites()
+        (all_sorted_points) = analyzer.get_neurites()
+
         thresholded_image_labeled = analyzer.timeframe_thresholded_neurites_labeled
         neurites_labeled = analyzer.timeframe_neurites_labeled
         self.neurites_labeled = neurites_labeled
         self.thresholded_image_labeled = thresholded_image_labeled
 
+
+        if type(self.analysis_path) != type(None):
+            thresholded_path = os.path.join(self.analysis_path,
+                                            self.image_name.replace(".tif",
+                                                               "_thresholded.tif"))
+            io.imsave(thresholded_path, thresholded_image_labeled)
+
+            neurites_path = os.path.join(self.analysis_path,
+                                            self.image_name.replace(".tif",
+                                                               "_neurites.tif"))
+            io.imsave(neurites_path, neurites_labeled)
+
+            plt.figure()
+            plt.imshow(thresholded_image_labeled)
+
+            plt.figure()
+            plt.imshow(neurites_labeled)
+
         neurite_labels = self.get_neurite_labels_of_all_comet_points(comet_data,
                                                                      thresholded_image_labeled,
                                                                      neurites_labeled)
+
         comet_data["neurite"] = neurite_labels
 
         # sort data before asigning values to prevent wrong assignments
@@ -136,31 +183,94 @@ class MTanalyzer():
         comet_data = comet_data.loc[comet_data["neurite"] != 0.0]
         comet_data = comet_data.loc[~ (np.isnan(comet_data["neurite"]))]
 
+        # all_neurite_points = np.array(np.where(neurites_labeled > 0)).T
+        # for point in all_neurite_points:
+        #     found_point = False
+        #     for neurite, sorted_points in all_sorted_points.items():
+        #         # go through each branch
+        #         for sorted_points_branch in sorted_points:
+        #             sorted_points_branch = [tuple(p) for p in sorted_points_branch]
+        #             if tuple(point) in sorted_points_branch:
+        #                 found_point = True
+        #                 break
+        #         if found_point:
+        #             break
+        #     if not found_point:
+        #         print("Point from image not found in neurite points:", point)
 
         # then get the point of the correct neurite (from the skeleton)
         # closest to the start point of the comet
-
         comet_data = self.add_closest_neurite_point_to_comet_data(comet_data,
                                                                   neurites_labeled)
+
         # check whether from first to last comet point the closest neurite point
         # is earlier in the sorted array (closer to the soma / minus-end-out)
         # or later in the sorted array (closer to neurite tip / plus-end-out)
-
         orientation_data = comet_data.groupby(["timepoint",
                                                "track_nb"]).apply(self.get_comet_orientation,
                                                                   all_sorted_points)
         comet_data["orientation"] = np.concatenate(orientation_data.values)
 
+
         # for comet orientation that could not be determined
         # check whether a clear comet direction can be found from
         # comparing the comet direction to neurite direction
-        comet_data_orientation_from_direction = self.get_comet_orientation_from_comparing_direction_to_neurite(comet_data,
-                                                                                                               all_sorted_points)
+        get_orientation = self.get_comet_orientation_from_comparing_direction_to_neurite
+        comet_data_orientation_from_direction = get_orientation(comet_data,
+                                                                all_sorted_points)
+
+        def _get_position_in_neurite_and_total_length(data, all_sorted_points,
+                                                      all_neurites_lengths):
+            closest_neurite_points = np.array((data["closest_neurite_point_x"],
+                                               data["closest_neurite_point_y"]))
+            neurite = data["neurite"]
+            all_sorted_points_neurite = all_sorted_points[neurite]
+            all_lengths = all_neurites_lengths[neurite]
+            point_index = []
+            for (branch_nb,
+                 all_sorted_points_branch) in enumerate(all_sorted_points_neurite):
+                all_sorted_points_branch_x = all_sorted_points_branch[:, 0]
+                all_sorted_points_branch_y = all_sorted_points_branch[:, 1]
+                # only update start or end point index
+                # if it was not found already
+                # this way start and end point can be on different branches
+                # and still both be found
+                if len(point_index) == 0:
+                    point_index = np.where(
+                        (all_sorted_points_branch_x == closest_neurite_points[0]) &
+                        (all_sorted_points_branch_y == closest_neurite_points[1]))[0]
+                if len(point_index) > 0:
+                    break
+
+            neurite_pos = all_lengths[branch_nb][point_index[0]]
+            return pd.Series((neurite_pos, all_lengths[-1], branch_nb))
+
+        # get position of EB comet within neurite
+        all_neurites_lengths = {}
+        for neurite_nb, sorted_points in all_sorted_points.items():
+            all_neurites_lengths[neurite_nb] = []
+            for sorted_points_branch in sorted_points:
+                all_diffs = (sorted_points_branch[1:] -
+                               sorted_points_branch[:-1])
+                all_lengths = np.sqrt(all_diffs[:,0]**2 + all_diffs[:,1]**2)
+                all_lengths = np.concatenate((np.zeros((1)), all_lengths),
+                                             axis=0)
+                all_lengths = np.cumsum(all_lengths, axis=0)
+                all_neurites_lengths[neurite_nb].append(all_lengths)
+        neurite_data = comet_data.apply(_get_position_in_neurite_and_total_length,
+                                        axis=1, args=(all_sorted_points,
+                                                      all_neurites_lengths))
+
+        comet_data["neurite_pos"] = neurite_data[0]
+        comet_data["neurite_length"] = neurite_data[1]
+        comet_data["branch"] = neurite_data[2]
+
         nan_rows = comet_data["orientation"].isnull()
         orientation_from_direction = comet_data_orientation_from_direction.loc[nan_rows,
                                                                                "orientation"]
         comet_data.loc[nan_rows, "orientation"] = orientation_from_direction
 
+        comet_data.reset_index(inplace=True)
         self.comet_data = comet_data
         return comet_data
 
@@ -207,9 +317,10 @@ class MTanalyzer():
             frames = np.expand_dims(frames, 1)
             coords_matrix = np.concatenate([frames, coords_matrix], axis=1)
 
-            # first two columns are x and y coordinates
+            # first two columns are y and x coordinates, respectively
+            # coordinates are aligned with raw images
             coords_data = pd.DataFrame( data=coords_matrix[:, :3],
-                                        columns=("frame", "x", "y"))
+                                        columns=("frame", "y", "x"))
             coords_data["track_nb"] = track_nb
 
             # make sure that coords data is sorted ascendingly by frame
@@ -228,6 +339,10 @@ class MTanalyzer():
         all_move_data["distance"] = (all_move_data["dx"] ** 2 +
                                      all_move_data["dy"] ** 2) ** 0.5
         all_move_data["speed"] = all_move_data["distance"] / all_move_data["dt"]
+        # subtract 1 from coordinates since they start counting
+        # at 1 and not at 0
+        all_move_data["x"] -= 1
+        all_move_data["y"] -= 1
         return all_move_data
 
 
@@ -271,12 +386,90 @@ class MTanalyzer():
         number_hole_px = len(np.where(filled_image == 0)[0])
         return number_hole_px
 
+
+    def add_buffer_in_one_direction(self, region_indices, axis_length,
+                                    buffer_around_zero_areas):
+        if len(region_indices) == 0:
+            return region_indices
+
+        # get region not in region_indices
+        all_indices = set(range(axis_length))
+        inverted_region_indices = all_indices - set(region_indices)
+
+        # if the left part of the image is 0, add buffer pixels at the left end
+        # (beginning) of the region not in region indices
+        if min(region_indices) == 0:
+            buffer_start = min(inverted_region_indices)
+            buffer_zero_rows = list(range(buffer_start,
+                                          buffer_start +
+                                          buffer_around_zero_areas))
+            region_indices.extend(buffer_zero_rows)
+        if max(region_indices) == (axis_length - 1):
+            buffer_end = max(inverted_region_indices) + 1
+            buffer_zero_rows = list(range(buffer_end -
+                                          buffer_around_zero_areas,
+                                          buffer_end))
+            region_indices.extend(buffer_zero_rows)
+        return region_indices
+
+    def get_zero_axis_indices_with_buffer(self, image_data, axis):
+
+        # get zero rows and columns in raw image data
+        axis_min_vals = np.min(image_data, axis=axis)
+        axis_max_vals = np.max(image_data, axis=axis)
+        zero_axis_indices = list(np.where((axis_min_vals == 0) &
+                                          (axis_max_vals == 0))[0])
+        axis_length = len(axis_min_vals)
+        zero_axis_indices = self.add_buffer_in_one_direction(zero_axis_indices,
+                                                             axis_length,
+                                                             self.buffer_around_zero_areas)
+        return np.array(zero_axis_indices)
+    
+    
+    def remove_zero_areas_from_image(self, image):
+        # reduce image to the x and y dimension
+        nb_dimensions = len(self.raw_image_data.shape)
+        dims_to_reduce = []
+        for dim in range(nb_dimensions - 2):
+            dims_to_reduce.append(dim)
+
+        raw_image_data = copy.copy(self.raw_image_data)
+
+
+        if len(dims_to_reduce) > 0:
+            # remove zero frames from image data first
+            raw_image_data_mins = np.min(self.raw_image_data, axis=(-2,-1))
+            raw_image_data_maxs = np.max(self.raw_image_data, axis=(-2,-1))
+            zero_frames = ((raw_image_data_mins == 0) &
+                           (raw_image_data_maxs == 0))
+            nonzero_frame_indices = np.where(zero_frames == False)[0]
+            raw_image_data = raw_image_data[nonzero_frame_indices,:,:]
+            raw_image_data = np.min(raw_image_data,
+                                    axis=tuple(dims_to_reduce))
+
+
+        # remove are
+        zero_rows = self.get_zero_axis_indices_with_buffer(raw_image_data,
+                                                           axis=1)
+        zero_columns = self.get_zero_axis_indices_with_buffer(raw_image_data,
+                                                              axis=0)
+        if len(zero_rows) > 0:
+            # set zero rows
+            image[zero_rows,:] = 0
+        if len(zero_columns) > 0:
+            image[:,zero_columns] = 0
+        return image
+
     def get_images_from_comets(self, comet_data, image_shape):
         """
         Create 2D image from points in comet traces.
         """
         image = np.zeros(image_shape)
         image[comet_data["x"].astype(int),comet_data["y"].astype(int)] = 1
+        
+        if (type(self.raw_image_data) != type(None)) & self.remove_zero_areas:
+            image = self.remove_zero_areas_from_image(image)
+
         image_averaged = filters.rank.mean(image, disk(5))
         image = image > 0
 
@@ -396,16 +589,33 @@ class MTanalyzer():
             continue_expanding_radius = True
             found_points = False
             search_radius = self.search_radius_start
+            image_shape = image_neurites_labeled.shape
             while continue_expanding_radius:
                 # continue expanding radius for possible neurite points
                 # for one more than needed to get a hit
                 # (to also include diagonally connected points, which might be closer)
                 if found_points:
                     continue_expanding_radius = False
-                x_slice = slice(start_point[0] - search_radius,
-                                start_point[0] + search_radius)
-                y_slice = slice(start_point[1] - search_radius,
-                                start_point[1] + search_radius)
+                # prevent slices from including negative numbers
+                # or going outside of the image
+                # get search radius for the x start of the region
+                # to prevent going out of the image
+                search_radius_x_start = min(start_point[0], search_radius)
+                # get search radius for the x end of the region
+                search_radius_x_end = min(image_shape[0]- 1 - start_point[0],
+                                          search_radius)
+
+                x_start = start_point[0] - search_radius_x_start
+                x_end = start_point[0] + search_radius_x_end
+                x_slice = slice(x_start, x_end)
+
+                search_radius_y_start = min(start_point[1], search_radius)
+                search_radius_y_end = min(image_shape[1]- 1 - start_point[1],
+                                          search_radius)
+
+                y_start = start_point[1] - search_radius_y_start
+                y_end = start_point[1] + search_radius_y_end
+                y_slice = slice(y_start,y_end)
                 search_area = image_neurites_labeled[x_slice,
                                                      y_slice]
                 possible_neurite_points = list(np.where(search_area ==
@@ -416,11 +626,9 @@ class MTanalyzer():
                 if search_radius > self.max_search_radius:
                     break
             if search_radius > self.max_search_radius:
-                return [np.nan, np.nan]
-            possible_neurite_points[0] += start_point[0] - (search_radius -
-                                                            self.search_radius_step)
-            possible_neurite_points[1] += start_point[1] - (search_radius -
-                                                            self.search_radius_step)
+                return [-1, -1]
+            possible_neurite_points[0] += start_point[0] - search_radius_x_start
+            possible_neurite_points[1] += start_point[1] - search_radius_y_start
             get_closest_point = generalTools.getClosestPoint
             closest_neurite_point = get_closest_point(possible_neurite_points,
                                                       np.expand_dims(start_point,
@@ -529,9 +737,36 @@ class MTanalyzer():
 
         closest_neurite_points = [tuple([int(neurite_point[0]),
                                         int(neurite_point[1])])
+                                  if ((neurite_point[0] != -1) &
+                                      (neurite_point[1] != -1))
+                                  else (np.nan, np.nan)
                                   for neurite_point in closest_neurite_points]
 
         neurite_direction_data = self.get_neurite_direction(all_sorted_points)
+
+        # set index to same indices as
+
+        # for neurite, sorted_points in all_sorted_points.items():
+        #     # go through each branch
+        #     for sorted_points_branch in sorted_points:
+        #         for point in sorted_points_branch:
+        #             if tuple(point) not in neurite_direction_data.index:
+        #                 print("Sorted point not in direction data: ", point)
+        #
+        # for point in closest_neurite_points:
+        #     found_point = False
+        #     for neurite, sorted_points in all_sorted_points.items():
+        #         # go through each branch
+        #         for sorted_points_branch in sorted_points:
+        #             sorted_points_branch = [tuple(p) for p in sorted_points_branch]
+        #             if tuple(point) in sorted_points_branch:
+        #                 found_point = True
+        #                 break
+        #         if found_point:
+        #             break
+        #     if not found_point:
+        #         print("Closest neurite point not found in neurite points:", point)
+
         neurite_directions = neurite_direction_data.loc[closest_neurite_points]
         comet_data_tmp["neurite_direction_x"] = neurite_directions["direction_x"].values
         comet_data_tmp["neurite_direction_y"] = neurite_directions["direction_y"].values
@@ -612,10 +847,22 @@ class MTanalyzer():
                 new_data["direction_x"] = neurite_direction[:,0]
                 new_data["direction_y"] = neurite_direction[:,1]
                 new_data["neurite"] = neurite
-                neurite_direction_data = neurite_direction_data.append(new_data,
-                                                                       ignore_index=True)
+                neurite_direction_data = pd.concat([neurite_direction_data,
+                                                    new_data])
+                # neurite_direction_data = neurite_direction_data.append(new_data,
+                #                                                        ignore_index=True)
+
+        # nan for nan direction for not available points
+        nan_direction = pd.DataFrame(data={"x":[np.nan], "y":[np.nan],
+                                           "direction_x":[np.nan],
+                                           "direction_y":[np.nan],
+                                           "neurite":[np.nan]})
+        neurite_direction_data = pd.concat([neurite_direction_data,
+                                            nan_direction])
+
         # remove duplicate points
-        neurite_direction_data = neurite_direction_data.groupby(["x", "y"]).first()
+        neurite_direction_data = neurite_direction_data.groupby(["x", "y"],
+                                                                dropna=False).first()
         return neurite_direction_data
 
 
@@ -655,8 +902,21 @@ class MTanalyzer():
         Get the angle from list of direction
         (split in delta x (directions_x) and delta y ( directions_y))
         """
-        angles = np.rad2deg(np.arctan(np.abs(directions_y)/
-                                      np.abs(directions_x)))
+        # prevent division by 0
+        if np.any(directions_x==0):
+            angles = []
+            for direction_x, direction_y in zip(directions_x, directions_y):
+                print(direction_x, direction_y)
+                if direction_x == 0:
+                    angles.append(np.rad2deg(np.arctan(0)))
+                else:
+                    angles.append(np.rad2deg(np.arctan(np.abs(direction_y) /
+                                                  np.abs(direction_x))))
+            angles = np.array(angles)
+        else:
+            angles = np.rad2deg(np.arctan(np.abs(directions_y) /
+                                          np.abs(directions_x)))
+
         angle_change_x = ((directions_y >= 0) & (directions_x < 0)) * 270
         angle_change_y = ((directions_y < 0) & (directions_x >= 0)) * 90
         angle_change_baseline = ((directions_y >= 0) & (directions_x >= 0)) * 90
