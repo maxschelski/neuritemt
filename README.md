@@ -15,6 +15,8 @@ The package was developed and tested on Windows.
 > cd neuritemt
 5. Create environment for neuritemt with Anaconda:
 > conda env create -f environment.yml
+6. Activate environment in Anaconda:
+> conda activate neuritemt
 6. Install neuritemt locally using pip:
 > pip install -e .
 7. Follow the installation for pyneurite (https://github.com/maxschelski/pyneurite)
